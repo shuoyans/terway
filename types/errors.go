@@ -17,6 +17,8 @@ const (
 	ErrPodENINotReady ErrCode = "PodENINotReady"
 
 	ErrIPOutOfSyncErr ErrCode = "OutIPOfSync"
+
+	ErrVmEniLeak ErrCode = "VmEniLeak"
 )
 
 type ErrCode string

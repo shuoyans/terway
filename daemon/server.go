@@ -7,6 +7,7 @@ import (
 	"net/http"
 	_ "net/http/pprof" // import pprof for diagnose
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"runtime"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+	corev1 "k8s.io/api/core/v1"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/AliyunContainerService/terway/pkg/logger"
@@ -22,6 +24,7 @@ import (
 	"github.com/AliyunContainerService/terway/pkg/tracing"
 	"github.com/AliyunContainerService/terway/pkg/utils"
 	"github.com/AliyunContainerService/terway/rpc"
+	"github.com/AliyunContainerService/terway/types"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -97,6 +100,21 @@ func Run(ctx context.Context, socketFilePath, debugSocketListen, configFilePath,
 		if err != nil {
 			logger.DefaultLogger.Errorf("error start grpc server: %v", err)
 			close(stop)
+		}
+	}()
+
+	go func() {
+		ticker := time.NewTicker(time.Minute)
+		// defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+			case <-ticker.C:
+				err := detectVportGoupLeak()
+				if err != nil {
+					logger.DefaultLogger.Errorf("error check vport group: %v", err)
+				}
+			}
 		}
 	}()
 
@@ -182,4 +200,25 @@ func cniInterceptor(ctx context.Context, req interface{}, info *grpc.UnaryServer
 	default:
 	}
 	return handler(ctx, req)
+}
+
+func detectVportGoupLeak() error {
+	cmd := "vswctl list_vport_group | awk '/^asi-/{sub(/^asi-/, \"\"); print}' | xargs -n1 -I {} bash -c \"crictl pods -o yaml | grep -q {} || echo vport group leaked: {}\""
+	out, err := exec.Command("bash", "-c", cmd).Output()
+	if err != nil {
+		return err
+	}
+	output := string(out)
+	if len(output) > 0 {
+		event_msg := "vm eni leak detected:"
+		lines := strings.Split(strings.TrimSpace(output), "\n")
+		for _, line := range lines {
+			event_msg += fmt.Sprintf(" [%s]", line)
+		}
+		tracing.RecordNodeEvent(corev1.EventTypeWarning, string(types.ErrVmEniLeak), event_msg)
+	} else {
+		event_msg := "no vm eni leak"
+		tracing.RecordNodeEvent(corev1.EventTypeNormal, "periodical eni inspection", event_msg)
+	}
+	return nil
 }
